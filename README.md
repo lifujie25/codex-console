@@ -172,8 +172,6 @@ docker run -d \
 - `DOCKERHUB_USERNAME`
 - `DOCKERHUB_TOKEN`
 
-另外工作流每 6 小时会检查一次 `steelydk/codex-console:latest` 的 digest，检测到变更时自动触发重建并发布。
-
 ## 使用远程 PostgreSQL
 
 ```bash
