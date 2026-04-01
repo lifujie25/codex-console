@@ -14,7 +14,6 @@ env:
   UPSTREAM_REPO: https://github.com/dou-jiang/codex-console.git
   IMAGE_NAME: lifj25/codex-console
   PLATFORMS: linux/amd64,linux/arm64
-  CUSTOM_COMMITS: 34fd4d6
 
 jobs:
   sync-and-publish:
@@ -80,6 +79,23 @@ jobs:
         shell: bash
         run: exit 0
 
+      - name: Stage overlay files
+        if: steps.image.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          OVERLAY_SOURCE="$GITHUB_WORKSPACE/.upstream-overlay/files"
+          OVERLAY_STAGING="$RUNNER_TEMP/upstream-overlay"
+          if [[ ! -d "$OVERLAY_SOURCE" ]]; then
+            echo "overlay 目录不存在: $OVERLAY_SOURCE" >&2
+            exit 1
+          fi
+
+          rm -rf "$OVERLAY_STAGING"
+          mkdir -p "$OVERLAY_STAGING"
+          cp -a "$OVERLAY_SOURCE/." "$OVERLAY_STAGING/"
+
       - name: Prepare source from upstream tag
         id: prepare
         if: steps.image.outputs.exists != 'true'
@@ -89,9 +105,13 @@ jobs:
 
           git checkout --detach "refs/tags/${{ steps.resolve.outputs.upstream_tag }}"
 
-          for commit in ${CUSTOM_COMMITS}; do
-            git cherry-pick "$commit"
-          done
+          OVERLAY_STAGING="$RUNNER_TEMP/upstream-overlay"
+          if [[ ! -d "$OVERLAY_STAGING" ]]; then
+            echo "overlay 暂存目录不存在: $OVERLAY_STAGING" >&2
+            exit 1
+          fi
+
+          cp -a "$OVERLAY_STAGING/." "$GITHUB_WORKSPACE/"
 
           echo "build_revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -135,7 +155,7 @@ jobs:
             echo "- Upstream tag: ${{ steps.resolve.outputs.upstream_tag }}"
             echo "- Image: ${IMAGE_NAME}:${{ steps.resolve.outputs.version }}"
             echo "- Platforms: ${PLATFORMS}"
-            echo "- Custom commits: ${CUSTOM_COMMITS}"
+            echo "- Overlay source: .upstream-overlay/files"
             if [[ "${{ steps.image.outputs.exists }}" == 'true' ]]; then
               echo "- Result: skipped (already published)"
             elif [[ "${{ job.status }}" == 'success' ]]; then
@@ -145,3 +165,73 @@ jobs:
               echo "- Result: failed"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send email notification
+        if: always() && steps.image.outputs.exists != 'true'
+        env:
+          SMTP_HOST: smtp.exmail.qq.com
+          SMTP_PORT: '465'
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.SMTP_FROM }}
+          EMAIL_TO: lifujie25@qq.com
+          UPSTREAM_TAG: ${{ steps.resolve.outputs.upstream_tag }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          BUILD_REVISION: ${{ steps.prepare.outputs.build_revision }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          if [[ -z "${SMTP_USERNAME}" || -z "${SMTP_PASSWORD}" ]]; then
+            echo "SMTP 未配置，跳过邮件通知。" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          python - <<'PY'
+          import os
+          import smtplib
+          from email.message import EmailMessage
+
+          status = os.environ.get("JOB_STATUS", "unknown")
+          upstream_tag = os.environ.get("UPSTREAM_TAG", "unknown")
+          image_name = os.environ.get("IMAGE_NAME", "unknown")
+          version = os.environ.get("VERSION", "unknown")
+          build_revision = os.environ.get("BUILD_REVISION", "")
+          run_url = os.environ.get("RUN_URL", "")
+          email_from = os.environ.get("EMAIL_FROM") or os.environ.get("SMTP_USERNAME")
+
+          if status == "success":
+              subject = f"[codex-console] Docker 发布成功 {upstream_tag}"
+              body = "\n".join([
+                  "自动同步并发布已完成。",
+                  f"上游版本: {upstream_tag}",
+                  f"镜像: {image_name}:{version}",
+                  f"latest: {image_name}:latest",
+                  f"构建提交: {build_revision}",
+                  f"运行详情: {run_url}",
+              ])
+          else:
+              subject = f"[codex-console] Docker 发布失败 {upstream_tag}"
+              body = "\n".join([
+                  "自动同步流程执行失败，请查看 GitHub Actions 日志。",
+                  f"上游版本: {upstream_tag}",
+                  f"目标镜像: {image_name}:{version}",
+                  f"运行详情: {run_url}",
+              ])
+
+          msg = EmailMessage()
+          msg["Subject"] = subject
+          msg["From"] = email_from
+          msg["To"] = os.environ["EMAIL_TO"]
+          msg.set_content(body)
+
+          host = os.environ["SMTP_HOST"]
+          port = int(os.environ.get("SMTP_PORT", "465"))
+          username = os.environ["SMTP_USERNAME"]
+          password = os.environ["SMTP_PASSWORD"]
+
+          with smtplib.SMTP_SSL(host, port) as server:
+              server.login(username, password)
+              server.send_message(msg)
+          PY
