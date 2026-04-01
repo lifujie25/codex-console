@@ -134,7 +134,7 @@ jobs:
           fi
 
           {
-            echo "tags<<'EOF'"
+            echo "tags<<EOF"
             printf '%b\n' "$TAGS"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
