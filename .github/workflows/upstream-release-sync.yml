@@ -9,6 +9,16 @@ on:
         description: "Optional upstream tag, for example v1.1.2"
         required: false
         type: string
+      force_republish:
+        description: "Force rebuild and push even if the version tag already exists"
+        required: false
+        default: false
+        type: boolean
+      publish_latest:
+        description: "Also publish the latest tag for this run"
+        required: false
+        default: true
+        type: boolean
 
 env:
   UPSTREAM_REPO: https://github.com/dou-jiang/codex-console.git
@@ -67,21 +77,26 @@ jobs:
           set -Eeuo pipefail
 
           VERSION="${{ steps.resolve.outputs.version }}"
+          FORCE_REPUBLISH="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish || 'false' }}"
           if docker manifest inspect "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "镜像 ${IMAGE_NAME}:${VERSION} 已存在，跳过构建。" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$FORCE_REPUBLISH" == 'true' ]]; then
+              echo "镜像 ${IMAGE_NAME}:${VERSION} 已存在，但本次启用了强制重发，将继续构建。" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "镜像 ${IMAGE_NAME}:${VERSION} 已存在，跳过构建。" >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Stop when image already exists
-        if: steps.image.outputs.exists == 'true'
+        if: steps.image.outputs.exists == 'true' && !(github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish == 'true')
         shell: bash
         run: exit 0
 
       - name: Prepare source from upstream tag
         id: prepare
-        if: steps.image.outputs.exists != 'true'
+        if: steps.image.outputs.exists != 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish == 'true')
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -91,31 +106,48 @@ jobs:
           echo "build_revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        if: steps.image.outputs.exists != 'true'
+        if: steps.image.outputs.exists != 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish == 'true')
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        if: steps.image.outputs.exists != 'true'
+        if: steps.image.outputs.exists != 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish == 'true')
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        if: steps.image.outputs.exists != 'true'
+        if: steps.image.outputs.exists != 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish == 'true')
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Generate image tags
+        id: tags
+        if: steps.image.outputs.exists != 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish == 'true')
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          TAGS="${IMAGE_NAME}:${{ steps.resolve.outputs.version }}"
+          PUBLISH_LATEST="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_latest || 'true' }}"
+          if [[ "$PUBLISH_LATEST" == 'true' ]]; then
+            TAGS="${TAGS}\n${IMAGE_NAME}:latest"
+          fi
+
+          {
+            echo "tags<<'EOF'"
+            printf '%b\n' "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
-        if: steps.image.outputs.exists != 'true'
+        if: steps.image.outputs.exists != 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish == 'true')
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
           push: true
           provenance: false
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.resolve.outputs.version }}
-            ${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.resolve.outputs.version }}
@@ -130,7 +162,7 @@ jobs:
             echo "- Upstream tag: ${{ steps.resolve.outputs.upstream_tag }}"
             echo "- Image: ${IMAGE_NAME}:${{ steps.resolve.outputs.version }}"
             echo "- Platforms: ${PLATFORMS}"
-            if [[ "${{ steps.image.outputs.exists }}" == 'true' ]]; then
+            if [[ "${{ steps.image.outputs.exists }}" == 'true' && "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish || 'false' }}" != 'true' ]]; then
               echo "- Result: skipped (already published)"
             elif [[ "${{ job.status }}" == 'success' ]]; then
               echo "- Result: published"
@@ -141,7 +173,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send email notification
-        if: always() && steps.image.outputs.exists != 'true'
+        if: always() && (steps.image.outputs.exists != 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.force_republish == 'true'))
         env:
           SMTP_HOST: smtp.exmail.qq.com
           SMTP_PORT: '465'
@@ -181,7 +213,7 @@ jobs:
                   "自动同步并发布已完成。",
                   f"上游版本: {upstream_tag}",
                   f"镜像: {image_name}:{version}",
-                  f"latest: {image_name}:latest",
+                  f"latest: {image_name}:latest (if enabled for this run)",
                   f"构建提交: {build_revision}",
                   f"运行详情: {run_url}",
               ])
