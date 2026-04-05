@@ -109,24 +109,36 @@ jobs:
 
           python - <<'PY'
           from pathlib import Path
+          import re
 
           file_path = Path("src/web/routes/registration.py")
           text = file_path.read_text()
 
-          signature_old = """async def run_outlook_batch_registration(\n    batch_id: str,\n    service_ids: List[int],\n    skip_registered: bool,\n    proxy: Optional[str],\n    interval_min: int,\n    interval_max: int,\n    concurrency: int = 1,\n    mode: str = \"pipeline\",\n    auto_upload_cpa: bool = False,\n    cpa_service_ids: List[int] = None,\n    auto_upload_sub2api: bool = False,\n    sub2api_service_ids: List[int] = None,\n    auto_upload_tm: bool = False,\n    tm_service_ids: List[int] = None,\n    auto_upload_new_api: bool = False,\n    new_api_service_ids: List[int] = None,\n):"""
-          signature_new = """async def run_outlook_batch_registration(\n    batch_id: str,\n    service_ids: List[int],\n    skip_registered: bool,\n    proxy: Optional[str],\n    interval_min: int,\n    interval_max: int,\n    concurrency: int = 1,\n    mode: str = \"pipeline\",\n    auto_upload_cpa: bool = False,\n    cpa_service_ids: List[int] = None,\n    auto_upload_sub2api: bool = False,\n    sub2api_service_ids: List[int] = None,\n    auto_upload_tm: bool = False,\n    tm_service_ids: List[int] = None,\n    auto_upload_new_api: bool = False,\n    new_api_service_ids: List[int] = None,\n    registration_type: str = RoleTag.CHILD.value,\n):"""
-          call_old = """        auto_upload_tm=auto_upload_tm,\n        tm_service_ids=tm_service_ids,\n        auto_upload_new_api=auto_upload_new_api,\n        new_api_service_ids=new_api_service_ids,\n    )"""
-          call_new = """        auto_upload_tm=auto_upload_tm,\n        tm_service_ids=tm_service_ids,\n        auto_upload_new_api=auto_upload_new_api,\n        new_api_service_ids=new_api_service_ids,\n        registration_type=registration_type,\n    )"""
-
           if "request.registration_type" in text:
-              if "registration_type: str = RoleTag.CHILD.value" not in text:
-                  if signature_old not in text:
-                      raise SystemExit("Outlook batch signature patch target not found")
-                  text = text.replace(signature_old, signature_new, 1)
-              if "registration_type=registration_type" not in text:
-                  if call_old not in text:
-                      raise SystemExit("Outlook batch run_batch_registration patch target not found")
-                  text = text.replace(call_old, call_new, 1)
+              signature_pattern = re.compile(
+                  r"(async def run_outlook_batch_registration\([\s\S]*?new_api_service_ids: List\[int\] = None,\n)(\):)",
+                  re.M,
+              )
+              text, sig_count = signature_pattern.subn(
+                  r"\1    registration_type: str = RoleTag.CHILD.value,\n\2",
+                  text,
+                  count=1,
+              )
+              if sig_count == 0 and "registration_type: str = RoleTag.CHILD.value" not in text:
+                  raise SystemExit("Outlook batch signature patch target not found")
+
+              call_pattern = re.compile(
+                  r"(auto_upload_tm=auto_upload_tm,\n\s*tm_service_ids=tm_service_ids,\n\s*auto_upload_new_api=auto_upload_new_api,\n\s*new_api_service_ids=new_api_service_ids,\n)(\s*\))",
+                  re.M,
+              )
+              text, call_count = call_pattern.subn(
+                  r"\1        registration_type=registration_type,\n\2",
+                  text,
+                  count=1,
+              )
+              if call_count == 0 and "registration_type=registration_type" not in text:
+                  raise SystemExit("Outlook batch run_batch_registration patch target not found")
+
               file_path.write_text(text)
           PY
 
